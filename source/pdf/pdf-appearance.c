@@ -40,6 +40,7 @@ typedef struct text_widget_info_s
 	font_info font_rec;
 	int q;
 	int multiline;
+	int password;
 	int comb;
 	int max_len;
 } text_widget_info;
@@ -188,6 +189,7 @@ static void get_text_widget_info(pdf_document *doc, pdf_obj *widget, text_widget
 	info->col = pdf_dict_getp(widget, "MK/BG");
 	info->q = pdf_to_int(pdf_get_inheritable(doc, widget, "Q"));
 	info->multiline = (ff & Ff_Multiline) != 0;
+	info->password = (ff & Ff_Password) != 0;
 	info->comb = (ff & (Ff_Multiline|Ff_Password|Ff_FileSelect|Ff_Comb)) == Ff_Comb;
 
 	if (ml == NULL)
@@ -1122,6 +1124,9 @@ void pdf_update_text_appearance(pdf_document *doc, pdf_obj *obj, char *eventValu
 			text = to_font_encoding(ctx, info.font_rec.font, eventValue);
 		else
 			text = pdf_field_value(doc, obj);
+
+		if (info.password)
+			memset(text, '*', strlen(text));
 
 		form = load_or_create_form(doc, obj, &rect);
 
