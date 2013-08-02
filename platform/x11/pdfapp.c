@@ -948,60 +948,349 @@ void pdfapp_onresize(pdfapp_t *app, int w, int h)
 	}
 }
 
-void pdfapp_onkey(pdfapp_t *app, int c)
+static void pdfapp_onkey_searching(pdfapp_t *app, int modifier, int c)
+{
+	int n = strlen(app->search);
+	if (c < ' ')
+	{
+		if (c == KEY_BACKSPACE && n > 0)
+		{
+			app->search[n - 1] = 0;
+			winrepaintsearch(app);
+		}
+		if (c == KEY_ENTER)
+		{
+			app->issearching = 0;
+			if (n > 0)
+			{
+				winrepaintsearch(app);
+
+				if (app->searchdir < 0)
+				{
+					if (app->pageno == 1)
+						app->pageno = app->pagecount;
+					else
+						app->pageno--;
+					pdfapp_showpage(app, 1, 1, 0, 0);
+				}
+
+				pdfapp_onkey(app, 0, 'n');
+			}
+			else
+				winrepaint(app);
+		}
+		if (c == KEY_ESCAPE)
+		{
+			app->issearching = 0;
+			winrepaint(app);
+		}
+	}
+	else
+	{
+		if (n + 2 < sizeof app->search)
+		{
+			app->search[n] = c;
+			app->search[n + 1] = 0;
+			winrepaintsearch(app);
+		}
+	}
+}
+
+static int iseol(int pre, int c, int post)
+{
+	switch (c)
+	{
+	case '\n': case '\r':
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int iswhite(int c)
+{
+	switch (c)
+	{
+	case '\n': case '\r': case '\t': case ' ':
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static void showcaret(fz_context *ctx, char *text, int idx, char *prefix)
+{
+	char buf[100];
+	int i;
+
+	memset(buf, 0, sizeof buf);
+	memcpy(buf, text, strlen(text) + 1);
+	memmove(&buf[idx + 1], &buf[idx], strlen(text) - idx + 1);
+	buf[idx] = '|';
+	for (i = 0; i < strlen(buf); i++)
+		if (buf[i] == '\r')
+			buf[i] = 'R';
+		else if (buf[i] == '\n')
+			buf[i] = 'N';
+		else if (buf[i] == '\t')
+			buf[i] = 'T';
+	fz_warn(ctx, "%sindex: %d -> '%s'", prefix, idx, buf);
+}
+
+static void pdfapp_onkey_editing(pdfapp_t *app, int modifier, int c)
+{
+	pdf_document *idoc = pdf_specifics(app->doc);
+	pdf_widget *widget = pdf_focused_widget(idoc);
+	char *text;
+
+	fz_warn(app->ctx, "char: '%c' 0x%02x", c, c);
+
+	if ((modifier & MODIFIER_CTRL) && (modifier & MODIFIER_ALT))
+		switch (c)
+		{
+		case 'h': /* backward kill word */ break;
+		case 'i': /* tab insert */ break;
+		case '?': /* backward kill word */ break;
+		default: return;
+		}
+	else if (modifier & MODIFIER_CTRL)
+		switch (c)
+		{
+		case 'a': modifier = 0; c = KEY_HOME; break;
+		case 'b': modifier = 0; c = KEY_LEFT; break;
+		case 'd': modifier = 0; c = KEY_DELETE; break;
+		case 'e': modifier = 0; c = KEY_END; break;
+		case 'f': modifier = 0; c = KEY_RIGHT; break;
+		case 'h': modifier = 0; c = KEY_BACKSPACE; break;
+		case 'k': /* kill line */ break;
+		case 'l': /* clear field */ break;
+		case 't': /* transpose characters */ break;
+		case 'u': /* unix line discard */ break;
+		case 'w': /* unix word rubout */ break;
+		case 'n': modifier = 0; c = KEY_DOWN; break;
+		case 'p': modifier = 0; c = KEY_UP; break;
+		default: return;
+		}
+	else if (modifier & MODIFIER_ALT)
+		switch (c)
+		{
+		case 'b': modifier = MODIFIER_CTRL; c = KEY_LEFT; break;
+		case 'd': modifier = MODIFIER_CTRL; c = KEY_DELETE; break;
+		case 'f': modifier = MODIFIER_CTRL; c = KEY_RIGHT; break;
+		case 't': /* transpose words */ break;
+		case '\\': /* delete horizontal space */ break;
+		case KEY_BACKSPACE: modifier = MODIFIER_CTRL; c = KEY_BACKSPACE; break;
+		default: return;
+		}
+
+	text = pdf_text_widget_text(idoc, widget);
+	if (text == NULL)
+		text = fz_calloc(app->ctx, 1, 1);
+
+	showcaret(app->ctx, text, app->editindex, "pre: ");
+
+	switch (c)
+	{
+	case KEY_RETURN:
+	case KEY_ENTER:
+		app->isediting = 0;
+		break;
+
+	case KEY_DELETE:
+		if (modifier & MODIFIER_CTRL)
+		{
+			int idx = app->editindex;
+
+			while (idx < strlen(text) && !iswhite(text[idx]))
+				idx++;
+
+			while (idx < strlen(text) && iswhite(text[idx]))
+				idx++;
+
+			memmove(&text[app->editindex], &text[idx], strlen(&text[idx]) + 1);
+			pdf_text_widget_set_text(idoc, widget, text);
+		}
+		else if (app->editindex < strlen(text))
+		{
+			int idx = app->editindex;
+			memmove(&text[idx], &text[idx + 1], strlen(text) - idx + 1);
+			pdf_text_widget_set_text(idoc, widget, text);
+		}
+		break;
+
+	case KEY_BACKSPACE:
+		if (modifier & MODIFIER_CTRL)
+		{
+			int idx = app->editindex;
+
+			while (idx > 0 && iswhite(text[idx - 1]))
+				idx--;
+
+			while (idx > 0 && !iswhite(text[idx - 1]))
+				idx--;
+
+			if (iswhite(text[idx]))
+				idx++;
+
+			memmove(&text[idx], &text[app->editindex], strlen(&text[app->editindex]) + 1);
+
+			app->editindex = idx;
+
+			pdf_text_widget_set_text(idoc, widget, text);
+		}
+		else if (app->editindex > 0)
+		{
+			int idx = app->editindex--;
+			memmove(&text[idx-1], &text[idx], strlen(text) - idx + 1);
+			pdf_text_widget_set_text(idoc, widget, text);
+		}
+		break;
+
+	case KEY_HOME:
+		if (modifier & MODIFIER_CTRL)
+			app->editindex = 0;
+		else
+		{
+			int idx = app->editindex;
+
+			if (idx > 0 && text[idx - 1] == '\n')
+				idx--;
+			if (idx > 0 && text[idx - 1] == '\r')
+				idx--;
+
+			while (idx > 0 && text[idx] != '\n')
+				idx--;
+
+			if (text[idx] == '\n')
+				idx++;
+
+			app->editindex = idx;
+		}
+		break;
+
+	case KEY_LEFT:
+		if ((modifier & MODIFIER_CTRL) && app->editindex > 0)
+		{
+			int idx = app->editindex;
+
+			while (idx > 0 && iswhite(text[idx - 1]))
+				idx--;
+
+			if (idx > 0)
+				idx--;
+
+			while (idx > 0 && !iswhite(text[idx - 1]))
+				idx--;
+
+			app->editindex = idx;
+		}
+		else if (app->editindex > 0)
+			app->editindex--;
+		break;
+
+	case KEY_RIGHT:
+		if ((modifier & MODIFIER_CTRL) && app->editindex < strlen(text))
+		{
+			int idx = app->editindex;
+
+			while (idx < strlen(text) && !iswhite(text[idx]))
+				idx++;
+
+			while (idx < strlen(text) && iswhite(text[idx]))
+				idx++;
+
+			app->editindex = idx;
+		}
+		else if (app->editindex < strlen(text))
+			app->editindex++;
+		break;
+
+	case KEY_UP:
+		{
+			int idx = app->editindex;
+			int lineidx;
+
+			pdfapp_onkey_editing(app, 0, KEY_HOME);
+			lineidx = idx - app->editindex;
+
+			pdfapp_onkey_editing(app, 0, KEY_HOME);
+			idx = app->editindex;
+
+			while (idx < strlen(text) && lineidx > 0 && text[idx] != '\r' && text[idx] != '\n')
+			{
+				idx++;
+				lineidx--;
+			}
+
+			app->editindex = idx;
+		}
+		break;
+
+	case KEY_DOWN:
+		{
+			int idx = app->editindex;
+			int lineidx;
+
+			pdfapp_onkey_editing(app, 0, KEY_HOME);
+			lineidx = idx - app->editindex;
+
+			pdfapp_onkey_editing(app, 0, KEY_END);
+			pdfapp_onkey_editing(app, 0, KEY_END);
+			pdfapp_onkey_editing(app, 0, KEY_HOME);
+			idx = app->editindex;
+
+			while (idx < strlen(text) && lineidx > 0 && text[idx] != '\r' && text[idx] != '\n')
+			{
+				idx++;
+				lineidx--;
+			}
+
+			app->editindex = idx;
+		}
+		break;
+
+	case KEY_END:
+		if (modifier & MODIFIER_CTRL)
+			app->editindex = strlen(text);
+		else
+		{
+			int idx = app->editindex;
+
+			if (idx < strlen(text) && text[idx] == '\r')
+				idx++;
+			if (idx < strlen(text) && text[idx] == '\n')
+				idx++;
+
+			while (idx < strlen(text) && text[idx] != '\r' && text[idx] != '\n')
+				idx++;
+
+			app->editindex = idx;
+		}
+		break;
+
+	default:
+		{
+			int idx = app->editindex++;
+			text = fz_resize_array_no_throw(app->ctx, text, strlen(text) + 2, 1);
+			memmove(&text[idx + 1], &text[idx], strlen(text) - idx + 1);
+			text[idx] = c;
+			pdf_text_widget_set_text(idoc, widget, text);
+		}
+		break;
+	}
+
+	showcaret(app->ctx, text, app->editindex, "post: ");
+
+	fz_free(app->ctx, text);
+
+	pdfapp_updatepage(app);
+}
+
+static void pdfapp_onkey_normal(pdfapp_t *app, int modifier, int c)
 {
 	int oldpage = app->pageno;
 	enum panning panto = PAN_TO_TOP;
 	int loadpage = 1;
-
-	if (app->issearching)
-	{
-		int n = strlen(app->search);
-		if (c < ' ')
-		{
-			if (c == '\b' && n > 0)
-			{
-				app->search[n - 1] = 0;
-				winrepaintsearch(app);
-			}
-			if (c == '\n' || c == '\r')
-			{
-				app->issearching = 0;
-				if (n > 0)
-				{
-					winrepaintsearch(app);
-
-					if (app->searchdir < 0)
-					{
-						if (app->pageno == 1)
-							app->pageno = app->pagecount;
-						else
-							app->pageno--;
-						pdfapp_showpage(app, 1, 1, 0, 0);
-					}
-
-					pdfapp_onkey(app, 'n');
-				}
-				else
-					winrepaint(app);
-			}
-			if (c == '\033')
-			{
-				app->issearching = 0;
-				winrepaint(app);
-			}
-		}
-		else
-		{
-			if (n + 2 < sizeof app->search)
-			{
-				app->search[n] = c;
-				app->search[n + 1] = 0;
-				winrepaintsearch(app);
-			}
-		}
-		return;
-	}
 
 	/*
 	 * Save numbers typed for later
@@ -1016,6 +1305,7 @@ void pdfapp_onkey(pdfapp_t *app, int c)
 	switch (c)
 	{
 
+	case KEY_ESCAPE:
 	case 'q':
 		winclose(app);
 		break;
@@ -1065,8 +1355,18 @@ void pdfapp_onkey(pdfapp_t *app, int c)
 		break;
 
 	case 'c':
-		app->grayscale ^= 1;
-		pdfapp_showpage(app, 0, 1, 1, 0);
+		if (modifier == MODIFIER_CTRL)
+			windocopy(app);
+		else
+		{
+			app->grayscale ^= 1;
+			pdfapp_showpage(app, 0, 1, 1, 0);
+		}
+		break;
+
+	case 'x':
+		if (modifier == MODIFIER_CTRL)
+			windocopy(app);
 		break;
 
 	case 'i':
@@ -1111,11 +1411,13 @@ void pdfapp_onkey(pdfapp_t *app, int c)
 		pdfapp_showpage(app, 0, 0, 1, 0);
 		break;
 
+	case KEY_DOWN:
 	case 'j':
 		app->pany -= fz_pixmap_height(app->ctx, app->image) / 10;
 		pdfapp_showpage(app, 0, 0, 1, 0);
 		break;
 
+	case KEY_UP:
 	case 'k':
 		app->pany += fz_pixmap_height(app->ctx, app->image) / 10;
 		pdfapp_showpage(app, 0, 0, 1, 0);
@@ -1131,8 +1433,8 @@ void pdfapp_onkey(pdfapp_t *app, int c)
 	 */
 
 	case 'g':
-	case '\n':
-	case '\r':
+	case KEY_RETURN:
+	case KEY_ENTER:
 		if (app->numberlen > 0)
 			app->pageno = atoi(app->number);
 		else
@@ -1183,6 +1485,7 @@ void pdfapp_onkey(pdfapp_t *app, int c)
 	 * Back and forth ...
 	 */
 
+	case KEY_PAGE_UP:
 	case ',':
 		panto = PAN_TO_BOTTOM;
 		if (app->numberlen > 0)
@@ -1191,6 +1494,7 @@ void pdfapp_onkey(pdfapp_t *app, int c)
 			app->pageno--;
 		break;
 
+	case KEY_PAGE_DOWN:
 	case '.':
 		panto = PAN_TO_TOP;
 		if (app->numberlen > 0)
@@ -1199,7 +1503,8 @@ void pdfapp_onkey(pdfapp_t *app, int c)
 			app->pageno++;
 		break;
 
-	case '\b':
+	case KEY_LEFT:
+	case KEY_BACKSPACE:
 	case 'b':
 		panto = DONT_PAN;
 		if (app->numberlen > 0)
@@ -1208,6 +1513,7 @@ void pdfapp_onkey(pdfapp_t *app, int c)
 			app->pageno--;
 		break;
 
+	case KEY_RIGHT:
 	case ' ':
 		panto = DONT_PAN;
 		if (app->numberlen > 0)
@@ -1307,6 +1613,23 @@ void pdfapp_onkey(pdfapp_t *app, int c)
 	}
 }
 
+void pdfapp_onkey(pdfapp_t *app, int modifier, int c)
+{
+	if (app->issearching)
+		pdfapp_onkey_searching(app, modifier, c);
+	else if (app->isediting)
+	{
+		pdf_document *idoc = pdf_specifics(app->doc);
+		pdf_widget *widget = pdf_focused_widget(idoc);
+		if (widget)
+			pdfapp_onkey_editing(app, modifier, c);
+		else
+			pdfapp_onkey_normal(app, modifier, c);
+	}
+	else
+		pdfapp_onkey_normal(app, modifier, c);
+}
+
 void pdfapp_onmouse(pdfapp_t *app, int x, int y, int btn, int modifiers, int state)
 {
 	fz_context *ctx = app->ctx;
@@ -1353,18 +1676,9 @@ void pdfapp_onmouse(pdfapp_t *app, int x, int y, int btn, int modifiers, int sta
 				case PDF_WIDGET_TYPE_TEXT:
 					{
 						char *text = pdf_text_widget_text(idoc, widget);
-						char *current_text = text;
-						int retry = 0;
-
-						do
-						{
-							current_text = wintextinput(app, current_text, retry);
-							retry = 1;
-						}
-						while (current_text && !pdf_text_widget_set_text(idoc, widget, current_text));
-
+						app->isediting = 1;
+						app->editindex = strlen(text);
 						fz_free(app->ctx, text);
-						pdfapp_updatepage(app);
 					}
 					break;
 
@@ -1492,7 +1806,7 @@ void pdfapp_onmouse(pdfapp_t *app, int x, int y, int btn, int modifiers, int sta
 		{
 			int dir = btn == 4 ? 1 : -1;
 			app->ispanning = app->iscopying = 0;
-			if (modifiers & (1<<2))
+			if (modifiers & MODIFIER_CTRL)
 			{
 				/* zoom in/out if ctrl is pressed */
 				if (dir > 0)
@@ -1509,7 +1823,7 @@ void pdfapp_onmouse(pdfapp_t *app, int x, int y, int btn, int modifiers, int sta
 			{
 				/* scroll up/down, or left/right if
 				shift is pressed */
-				int isx = (modifiers & (1<<0));
+				int isx = (modifiers & MODIFIER_SHIFT);
 				int xstep = isx ? 20 * dir : 0;
 				int ystep = !isx ? 20 * dir : 0;
 				pdfapp_panview(app, app->panx + xstep, app->pany + ystep);
@@ -1537,7 +1851,7 @@ void pdfapp_onmouse(pdfapp_t *app, int x, int y, int btn, int modifiers, int sta
 			app->selr.y1 = fz_maxi(app->sely, y) - app->pany + irect.y0;
 			winrepaint(app);
 			if (app->selr.x0 < app->selr.x1 && app->selr.y0 < app->selr.y1)
-				windocopy(app);
+				windoselection(app);
 		}
 		app->ispanning = 0;
 	}

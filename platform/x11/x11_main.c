@@ -60,6 +60,7 @@ extern void ximage_blit(Drawable d, GC gc, int dstx, int dsty,
 	int srcx, int srcy, int srcw, int srch, int srcstride);
 
 void windrawstringxor(pdfapp_t *app, int x, int y, char *s);
+void windrawlinexor(pdfapp_t*, int x0, int y0, int x1, int y1);
 void cleanup(pdfapp_t *app);
 
 static Display *xdpy;
@@ -459,13 +460,13 @@ static void fillrect(int x, int y, int w, int h)
 
 static void winblitstatusbar(pdfapp_t *app)
 {
-	if (gapp.issearching)
+	if (app->issearching)
 	{
-		char buf[sizeof(gapp.search) + 50];
-		sprintf(buf, "Search: %s", gapp.search);
+		char buf[sizeof(app->search) + 50];
+		sprintf(buf, "Search: %s", app->search);
 		XSetForeground(xdpy, xgc, WhitePixel(xdpy, xscr));
-		fillrect(0, 0, gapp.winw, 30);
-		windrawstring(&gapp, 10, 20, buf);
+		fillrect(0, 0, app->winw, 30);
+		windrawstring(app, 10, 20, buf);
 	}
 	else if (showingmessage)
 	{
@@ -479,6 +480,12 @@ static void winblitstatusbar(pdfapp_t *app)
 		snprintf(buf, sizeof buf, "Page %d/%d", gapp.pageno, gapp.pagecount);
 		windrawstringxor(&gapp, 10, 20, buf);
 	}
+}
+
+static void winblitediting(pdfapp_t *app)
+{
+	if (app->isediting)
+		windrawlinexor(app, app->editx0, app->edity0, app->editx1, app->edity1);
 }
 
 static void winblit(pdfapp_t *app)
@@ -604,6 +611,26 @@ void windrawstring(pdfapp_t *app, int x, int y, char *s)
 	XDrawString(xdpy, xwin, xgc, x, y, s, strlen(s));
 }
 
+void windrawlinexor(pdfapp_t *app, int x0, int y0, int x1, int y1)
+{
+	int prevfunction;
+	XGCValues xgcv;
+
+	XGetGCValues(xdpy, xgc, GCFunction, &xgcv);
+	prevfunction = xgcv.function;
+	xgcv.function = GXxor;
+	XChangeGC(xdpy, xgc, GCFunction, &xgcv);
+
+	XSetForeground(xdpy, xgc, WhitePixel(xdpy, DefaultScreen(xdpy)));
+
+	XDrawLine(xdpy, xwin, xgc, x0, y0, x1, y1);
+	XFlush(xdpy);
+
+	XGetGCValues(xdpy, xgc, GCFunction, &xgcv);
+	xgcv.function = prevfunction;
+	XChangeGC(xdpy, xgc, GCFunction, &xgcv);
+}
+
 void docopy(pdfapp_t *app, Atom copy_target)
 {
 	unsigned short copyucs2[16 * 1024];
@@ -612,7 +639,7 @@ void docopy(pdfapp_t *app, Atom copy_target)
 	unsigned short *ucs2;
 	int ucs;
 
-	pdfapp_oncopy(&gapp, copyucs2, 16 * 1024);
+	pdfapp_oncopy(app, copyucs2, 16 * 1024);
 
 	for (ucs2 = copyucs2; ucs2[0] != 0; ucs2++)
 	{
@@ -634,9 +661,14 @@ void docopy(pdfapp_t *app, Atom copy_target)
 	justcopied = 1;
 }
 
-void windocopy(pdfapp_t *app)
+void windoselection(pdfapp_t *app)
 {
 	docopy(app, XA_PRIMARY);
+}
+
+void windocopy(pdfapp_t *app)
+{
+	docopy(app, XA_CLIPBOARD);
 }
 
 void onselreq(Window requestor, Atom selection, Atom target, Atom property, Time time)
@@ -734,7 +766,7 @@ void winopenuri(pdfapp_t *app, char *buf)
 	}
 }
 
-static void onkey(int c)
+static void onkey(int modifier, int c)
 {
 	advance_scheduled = 0;
 
@@ -744,7 +776,7 @@ static void onkey(int c)
 		winrepaint(&gapp);
 	}
 
-	if (!gapp.issearching && c == 'P')
+	if (!gapp.issearching && !gapp.isediting && modifier == 0 && c == 'P')
 	{
 		struct timeval now;
 		struct timeval tmo;
@@ -757,6 +789,7 @@ static void onkey(int c)
 		return;
 	}
 
+<<<<<<< HEAD
 	pdfapp_onkey(&gapp, c);
 
 	if (gapp.issearching)
@@ -764,6 +797,9 @@ static void onkey(int c)
 		showingpage = 0;
 		showingmessage = 0;
 	}
+=======
+	pdfapp_onkey(&gapp, modifier, c);
+>>>>>>> wip
 }
 
 static void onmouse(int x, int y, int btn, int modifiers, int state)
@@ -812,6 +848,7 @@ int main(int argc, char **argv)
 	struct timeval now;
 	struct timeval *timeout;
 	struct timeval tmo_advance_delay;
+	int modifier;
 
 	ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
 	if (!ctx)
@@ -893,40 +930,43 @@ int main(int argc, char **argv)
 			case KeyPress:
 				len = XLookupString(&xevt.xkey, buf, sizeof buf, &keysym, NULL);
 
-				if (!gapp.issearching)
-					switch (keysym)
-					{
-					case XK_Escape:
-						len = 1; buf[0] = '\033';
-						break;
+				modifier = 0;
+				if (xevt.xkey.state & ControlMask)
+					modifier |= MODIFIER_CTRL;
+				if (xevt.xkey.state & ShiftMask)
+					modifier |= MODIFIER_SHIFT;
+				if (xevt.xkey.state & Mod1Mask)
+					modifier |= MODIFIER_ALT;
 
-					case XK_Up:
-						len = 1; buf[0] = 'k';
-						break;
-					case XK_Down:
-						len = 1; buf[0] = 'j';
-						break;
+				switch (keysym)
+				{
+					case XK_BackSpace: c = KEY_BACKSPACE; break;
+					case XK_Tab: c = KEY_TAB; break;
+					case XK_Return: c = KEY_ENTER; break;
+					case XK_Up: c = KEY_UP; break;
+					case XK_Down: c = KEY_DOWN; break;
+					case XK_Left: c = KEY_LEFT; break;
+					case XK_Right: c = KEY_RIGHT; break;
+					case XK_Home: c = KEY_HOME; break;
+					case XK_End: c = KEY_END; break;
+					case XK_Page_Up: c = KEY_PAGE_UP; break;
+					case XK_Page_Down: c = KEY_PAGE_DOWN; break;
+					case XK_Delete: c = KEY_DELETE; break;
+					case XK_Escape: c = KEY_ESCAPE; break;
+					case XK_Shift_L:
+					case XK_Shift_R:
+					case XK_Control_L:
+					case XK_Control_R:
+					case XK_Alt_L:
+					case XK_Alt_R: c = 0; break;
+					default: c = keysym; break;
+				}
 
-					case XK_Left:
-						len = 1; buf[0] = 'b';
-						break;
-					case XK_Right:
-						len = 1; buf[0] = ' ';
-						break;
-
-					case XK_Page_Up:
-						len = 1; buf[0] = ',';
-						break;
-					case XK_Page_Down:
-						len = 1; buf[0] = '.';
-						break;
-					}
-				if (xevt.xkey.state & ControlMask && keysym == XK_c)
-					docopy(&gapp, XA_CLIPBOARD);
-				else if (len)
-					onkey(buf[0]);
-
-				onmouse(oldx, oldy, 0, 0, 0);
+				if (c != 0)
+				{
+					onkey(modifier, c);
+					onmouse(oldx, oldy, 0, 0, 0);
+				}
 
 				break;
 
@@ -1020,7 +1060,7 @@ int main(int argc, char **argv)
 			if (tmo_advance_delay.tv_sec <= 0)
 			{
 				/* Too late already */
-				onkey(' ');
+				onkey(0, ' ');
 				onmouse(oldx, oldy, 0, 0, 0);
 				advance_scheduled = 0;
 			}
@@ -1052,7 +1092,7 @@ int main(int argc, char **argv)
 		{
 			if (timeout == &tmo_advance_delay)
 			{
-				onkey(' ');
+				onkey(0, ' ');
 				onmouse(oldx, oldy, 0, 0, 0);
 				advance_scheduled = 0;
 			}

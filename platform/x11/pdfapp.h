@@ -19,6 +19,12 @@ enum { ARROW, HAND, WAIT, CARET };
 
 enum { DISCARD, SAVE, CANCEL };
 
+enum { KEY_BACKSPACE = '\b', KEY_TAB = '\t', KEY_RETURN = '\n', KEY_ENTER = '\r',
+	KEY_ESCAPE = 0x1b, KEY_HOME = 0xff50, KEY_LEFT, KEY_UP, KEY_RIGHT,
+	KEY_DOWN, KEY_PAGE_UP, KEY_PAGE_DOWN, KEY_END, KEY_DELETE = 0xffff };
+
+enum { MODIFIER_SHIFT = 1<<0, MODIFIER_CTRL = 1<<2, MODIFIER_ALT = 1<<3 };
+
 extern void winwarn(pdfapp_t*, char *s);
 extern void winerror(pdfapp_t*, char *s);
 extern void wintitle(pdfapp_t*, char *title);
@@ -30,6 +36,7 @@ extern char *wintextinput(pdfapp_t*, char *inittext, int retry);
 extern int winchoiceinput(pdfapp_t*, int nopts, char *opts[], int *nvals, char *vals[]);
 extern void winopenuri(pdfapp_t*, char *s);
 extern void wincursor(pdfapp_t*, int curs);
+extern void windoselection(pdfapp_t*);
 extern void windocopy(pdfapp_t*);
 extern void winreloadfile(pdfapp_t*);
 extern void windrawstring(pdfapp_t*, int x, int y, char *s);
@@ -125,6 +132,14 @@ struct pdfapp_s
 	fz_rect hit_bbox[512];
 	int hit_count;
 
+	/* text widget state */
+	int isediting;
+	int editindex;
+	int editx0;
+	int edity0;
+	int editx1;
+	int edity1;
+
 	/* client context storage */
 	void *userdata;
 
@@ -143,7 +158,7 @@ int pdfapp_preclose(pdfapp_t *app);
 char *pdfapp_version(pdfapp_t *app);
 char *pdfapp_usage(pdfapp_t *app);
 
-void pdfapp_onkey(pdfapp_t *app, int c);
+void pdfapp_onkey(pdfapp_t *app, int modifier, int c);
 void pdfapp_onmouse(pdfapp_t *app, int x, int y, int btn, int modifiers, int state);
 void pdfapp_oncopy(pdfapp_t *app, unsigned short *ucsbuf, int ucslen);
 void pdfapp_onresize(pdfapp_t *app, int w, int h);
