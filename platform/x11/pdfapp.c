@@ -996,16 +996,15 @@ static void pdfapp_onkey_searching(pdfapp_t *app, int modifier, int c)
 	}
 }
 
-static int iseol(int pre, int c, int post)
-{
-	switch (c)
-	{
-	case '\n': case '\r':
-		return 1;
-	default:
-		return 0;
-	}
-}
+#define isnewline(c) (c == '\n')
+#define isreturn(c) (c == '\r')
+#define iseol(c) (isnewline(c) || isreturn(c))
+#define atparagraphstart(text, idx) atparagraph((text), (idx), 1)
+#define atparagraphend(text, idx) atparagraph((text), (idx), 0)
+#define ateolstart(text, idx) ateol((text), (idx), 1)
+#define ateolend(text, idx) ateol((text), (idx), 0)
+
+static void pdfapp_onkey_editing(pdfapp_t *app, int modifier, int c);
 
 static int iswhite(int c)
 {
@@ -1016,6 +1015,67 @@ static int iswhite(int c)
 	default:
 		return 0;
 	}
+}
+
+
+static int atparagraph(char *text, int idx, int start)
+{
+	char a, b, c, d;
+
+	if (start)
+	{
+		a = idx - 4 >= 0 ? text[idx - 4] : 0;
+		b = idx - 3 >= 0 ? text[idx - 3] : 0;
+		c = idx - 2 >= 0 ? text[idx - 2] : 0;
+		d = idx - 1 >= 0 ? text[idx - 1] : 0;
+	}
+	else
+	{
+		a = idx + 1 < strlen(text) ? text[idx + 1] : 0;
+		b = idx + 2 < strlen(text) ? text[idx + 2] : 0;
+		c = idx + 3 < strlen(text) ? text[idx + 3] : 0;
+		d = idx + 4 < strlen(text) ? text[idx + 4] : 0;
+	}
+
+	if (isreturn(a) && isnewline(b) && isreturn(c) && isnewline(d))
+		return 4;
+	if (idx == 2 && isreturn(a) && isnewline(b))
+		return 2;
+
+	if (isnewline(a) && isnewline(b))
+		return 2;
+	if (idx == 1 && isnewline(a))
+		return 1;
+
+	if (isreturn(a) && isreturn(b))
+		return 2;
+	if (idx == 1 && isreturn(a))
+		return 1;
+
+	return 0;
+}
+
+static int ateol(char *text, int idx, int start)
+{
+	char a, b;
+
+	if (start)
+	{
+		a = idx + 0 < strlen(text) ? text[idx + 0] : 0;
+		b = idx + 1 < strlen(text) ? text[idx + 1] : 0;
+	}
+	else
+	{
+		a = idx - 1 > 0 ? text[idx - 1] : 0;
+		b = idx - 0 > 0 ? text[idx - 0] : 0;
+	}
+
+	if (isreturn(a) && isnewline(b))
+		return 2;
+	if (iseol(a))
+		return 1;
+
+	return 0;
 }
 
 static void showcaret(fz_context *ctx, char *text, int idx, char *prefix)
@@ -1037,6 +1097,333 @@ static void showcaret(fz_context *ctx, char *text, int idx, char *prefix)
 	fz_warn(ctx, "%sindex: %d -> '%s'", prefix, idx, buf);
 }
 
+/* accept line */
+static char *pdfapp_edit_accept_line(pdfapp_t *app, char *text)
+{
+	app->isediting = 0;
+	return text;
+}
+
+/* backward char */
+static char *pdfapp_edit_backward_char(pdfapp_t *app, char *text)
+{
+	if (app->editindex > 1 && ateolend(text, app->editindex - 1))
+	{
+		fz_warn(app->ctx, "ateolend: %d", ateolend(text, app->editindex - 1));
+		app->editindex -= ateolend(text, app->editindex - 1);
+	}
+	else if (app->editindex > 0)
+		app->editindex--;
+	return text;
+}
+
+/* backward delete char */
+static char *pdfapp_edit_backward_delete_char(pdfapp_t *app, char *text)
+{
+	if (app->editindex > 0)
+	{
+		memmove(&text[app->editindex - 1], &text[app->editindex], strlen(&text[app->editindex]) + 1);
+		text = fz_resize_array(app->ctx, text, strlen(text) + 1, 1);
+		app->editindex--;
+	}
+
+	return text;
+}
+
+/* backward kill word */
+static char *pdfapp_edit_backward_kill_word(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+
+	while (idx > 0 && iswhite(text[idx - 1]))
+		idx--;
+
+	while (idx > 0 && !iswhite(text[idx - 1]))
+		idx--;
+
+	memmove(&text[idx], &text[app->editindex], strlen(&text[app->editindex]) + 1);
+
+	app->editindex = idx;
+
+	return text;
+}
+
+/* backward line */
+static char *pdfapp_edit_backward_line(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+	int chars;
+
+	pdfapp_onkey_editing(app, 0, KEY_HOME);
+	chars = idx - app->editindex;
+
+	pdfapp_onkey_editing(app, 0, KEY_HOME);
+	idx = app->editindex;
+
+	while (idx < strlen(text) && chars-- > 0 && !iseol(text[idx]))
+		idx++;
+
+	app->editindex = idx;
+
+	return text;
+}
+
+/* backward paragraph */
+static char *pdfapp_edit_backward_paragraph(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+
+	while (idx > 0 && iseol(text[idx]))
+		idx--;
+
+	while (idx > 0 && !atparagraphstart(text, idx))
+		idx--;
+
+	app->editindex = idx;
+
+	return text;
+}
+
+/* backward word */
+static char *pdfapp_edit_backward_word(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+
+	while (idx > 0 && iswhite(text[idx - 1]))
+		idx--;
+
+	if (idx > 0)
+		idx--;
+
+	while (idx > 0 && !iswhite(text[idx - 1]))
+		idx--;
+
+	app->editindex = idx;
+
+	return text;
+}
+
+/* beginning of line */
+static char *pdfapp_edit_beginning_of_line(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+
+	if (idx > 0 && isnewline(text[idx - 1]))
+		idx--;
+	if (idx > 0 && isreturn(text[idx - 1]))
+		idx--;
+
+	while (idx > 0 && !iseol(text[idx - 1]))
+		idx--;
+
+	app->editindex = idx;
+
+	return text;
+}
+
+/* beginning of text */
+static char *pdfapp_edit_beginning_of_text(pdfapp_t *app, char *text)
+{
+	app->editindex = 0;
+	return text;
+}
+
+/* clear text */
+static char *pdfapp_edit_clear_text(pdfapp_t *app, char *text)
+{
+	text[0] = '\0';
+	app->editindex = 0;
+	return fz_resize_array(app->ctx, text, strlen(text) + 1, 1);
+}
+
+/* delete char */
+static char *pdfapp_edit_delete_char(pdfapp_t *app, char *text)
+{
+	if (app->editindex < strlen(text))
+	{
+		memmove(&text[app->editindex], &text[app->editindex + 1],
+				strlen(&text[app->editindex + 1]) + 1);
+		text = fz_resize_array(app->ctx, text, strlen(text) + 1, 1);
+	}
+
+	return text;
+}
+
+/* end of line */
+static char *pdfapp_edit_end_of_line(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+
+	if (idx < strlen(text) && text[idx] == '\r')
+		idx++;
+	if (idx < strlen(text) && text[idx] == '\n')
+		idx++;
+
+	while (idx < strlen(text) && text[idx] != '\r' && text[idx] != '\n')
+		idx++;
+
+	app->editindex = idx;
+
+	return text;
+}
+
+/* end of text */
+static char *pdfapp_edit_end_of_text(pdfapp_t *app, char *text)
+{
+	app->editindex = strlen(text);
+	return text;
+}
+
+/* eol insert */
+static char *pdfapp_edit_eol_insert(pdfapp_t *app, char *text)
+{
+	char *eol;
+
+	if (strstr(text, "\r\n"))
+		eol = "\r\n";
+	else if (strchr(text, '\r'))
+		eol = "\r";
+	else
+		eol = "\n";
+
+	text = fz_resize_array(app->ctx, text, strlen(text) + strlen(eol) + 1, 1);
+	memmove(&text[app->editindex + strlen(eol)], &text[app->editindex],
+			strlen(&text[app->editindex]) + 1);
+	memmove(&text[app->editindex], eol, strlen(eol));
+
+	return text;
+}
+
+/* forward char */
+static char *pdfapp_edit_forward_char(pdfapp_t *app, char *text)
+{
+	if (app->editindex < strlen(text))
+	{
+		fz_warn(app->ctx, "ateolstart: %d", ateolstart(text, app->editindex));
+		if (ateolstart(text, app->editindex))
+			app->editindex += ateolstart(text, app->editindex);
+		else
+			app->editindex++;
+	}
+	return text;
+}
+
+/* forward line */
+static char *pdfapp_edit_forward_line(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+	int chars;
+
+	pdfapp_onkey_editing(app, 0, KEY_HOME);
+	chars = idx - app->editindex;
+
+	pdfapp_onkey_editing(app, 0, KEY_END);
+	pdfapp_onkey_editing(app, 0, KEY_END);
+	pdfapp_onkey_editing(app, 0, KEY_HOME);
+	idx = app->editindex;
+
+	while (idx < strlen(text) && chars-- > 0 && !iseol(text[idx]))
+		idx++;
+
+	app->editindex = idx;
+
+	return text;
+}
+
+/* forward paragraph */
+static char *pdfapp_edit_forward_paragraph(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+
+	while (idx < strlen(text) && iseol(text[idx]))
+		idx++;
+
+	while (idx < strlen(text) && !atparagraphend(text, idx))
+		idx++;
+
+	app->editindex = idx;
+
+	return text;
+}
+
+/* forward word */
+static char *pdfapp_edit_forward_word(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+
+	while (idx < strlen(text) && !iswhite(text[idx]))
+		idx++;
+
+	while (idx < strlen(text) && iswhite(text[idx]))
+		idx++;
+
+	app->editindex = idx;
+
+	return text;
+}
+
+/* kill line */
+static char *pdfapp_edit_kill_line(pdfapp_t *app, char *text)
+{
+	text[app->editindex] = '\0';
+	return fz_resize_array(app->ctx, text, strlen(text) + 1, 1);
+}
+
+/* kill word */
+static char *pdfapp_edit_kill_word(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+
+	while (idx < strlen(text) && !iswhite(text[idx]))
+		idx++;
+
+	while (idx < strlen(text) && iswhite(text[idx]))
+		idx++;
+
+	memmove(&text[app->editindex], &text[idx], strlen(&text[idx]) + 1);
+
+	return fz_resize_array(app->ctx, text, strlen(text) + 1, 1);
+}
+
+/* self insert */
+static char *pdfapp_edit_self_insert(pdfapp_t *app, char *text, char c)
+{
+	text = fz_resize_array(app->ctx, text, strlen(text) + 2, 1);
+	memmove(&text[app->editindex + 1], &text[app->editindex],
+			strlen(&text[app->editindex]) + 1);
+	text[app->editindex++] = c;
+	return text;
+}
+
+/* unix line discard */
+static char *pdfapp_edit_unix_line_discard(pdfapp_t *app, char *text)
+{
+	memmove(&text[0], &text[app->editindex], strlen(&text[app->editindex]) + 1);
+	app->editindex = 0;
+	return fz_resize_array(app->ctx, text, strlen(text) + 1, 1);
+}
+
+/* unix word rubout */
+static char *pdfapp_edit_unix_word_rubout(pdfapp_t *app, char *text)
+{
+	int idx = app->editindex;
+
+	while (idx > 0 && iswhite(text[idx - 1]))
+		idx--;
+
+	while (idx > 0 && !iswhite(text[idx - 1]))
+		idx--;
+
+	if (iswhite(text[idx]))
+		idx++;
+
+	memmove(&text[idx], &text[app->editindex], strlen(&text[app->editindex]) + 1);
+
+	app->editindex = idx;
+
+	return fz_resize_array(app->ctx, text, strlen(text) + 1, 1);
+}
+
 static void pdfapp_onkey_editing(pdfapp_t *app, int modifier, int c)
 {
 	pdf_document *idoc = pdf_specifics(app->doc);
@@ -1045,242 +1432,77 @@ static void pdfapp_onkey_editing(pdfapp_t *app, int modifier, int c)
 
 	fz_warn(app->ctx, "char: '%c' 0x%02x", c, c);
 
-	if ((modifier & MODIFIER_CTRL) && (modifier & MODIFIER_ALT))
-		switch (c)
-		{
-		case 'h': /* backward kill word */ break;
-		case 'i': /* tab insert */ break;
-		case '?': /* backward kill word */ break;
-		default: return;
-		}
-	else if (modifier & MODIFIER_CTRL)
-		switch (c)
-		{
-		case 'a': modifier = 0; c = KEY_HOME; break;
-		case 'b': modifier = 0; c = KEY_LEFT; break;
-		case 'd': modifier = 0; c = KEY_DELETE; break;
-		case 'e': modifier = 0; c = KEY_END; break;
-		case 'f': modifier = 0; c = KEY_RIGHT; break;
-		case 'h': modifier = 0; c = KEY_BACKSPACE; break;
-		case 'k': /* kill line */ break;
-		case 'l': /* clear field */ break;
-		case 't': /* transpose characters */ break;
-		case 'u': /* unix line discard */ break;
-		case 'w': /* unix word rubout */ break;
-		case 'n': modifier = 0; c = KEY_DOWN; break;
-		case 'p': modifier = 0; c = KEY_UP; break;
-		default: return;
-		}
-	else if (modifier & MODIFIER_ALT)
-		switch (c)
-		{
-		case 'b': modifier = MODIFIER_CTRL; c = KEY_LEFT; break;
-		case 'd': modifier = MODIFIER_CTRL; c = KEY_DELETE; break;
-		case 'f': modifier = MODIFIER_CTRL; c = KEY_RIGHT; break;
-		case 't': /* transpose words */ break;
-		case '\\': /* delete horizontal space */ break;
-		case KEY_BACKSPACE: modifier = MODIFIER_CTRL; c = KEY_BACKSPACE; break;
-		default: return;
-		}
-
 	text = pdf_text_widget_text(idoc, widget);
 	if (text == NULL)
 		text = fz_calloc(app->ctx, 1, 1);
 
 	showcaret(app->ctx, text, app->editindex, "pre: ");
 
-	switch (c)
-	{
-	case KEY_RETURN:
-	case KEY_ENTER:
-		app->isediting = 0;
-		break;
-
-	case KEY_DELETE:
-		if (modifier & MODIFIER_CTRL)
+	if ((modifier & MODIFIER_CTRL) && (modifier & MODIFIER_ALT))
+		switch (c)
 		{
-			int idx = app->editindex;
-
-			while (idx < strlen(text) && !iswhite(text[idx]))
-				idx++;
-
-			while (idx < strlen(text) && iswhite(text[idx]))
-				idx++;
-
-			memmove(&text[app->editindex], &text[idx], strlen(&text[idx]) + 1);
-			pdf_text_widget_set_text(idoc, widget, text);
+		case 'h': text = pdfapp_edit_backward_kill_word(app, text); break;
+		case '?': text = pdfapp_edit_backward_kill_word(app, text); break;
+		default: return;
 		}
-		else if (app->editindex < strlen(text))
+	else if (modifier & MODIFIER_CTRL)
+		switch (c)
 		{
-			int idx = app->editindex;
-			memmove(&text[idx], &text[idx + 1], strlen(text) - idx + 1);
-			pdf_text_widget_set_text(idoc, widget, text);
+		case 'a': text = pdfapp_edit_beginning_of_line(app, text); break;
+		case 'b': text = pdfapp_edit_backward_char(app, text); break;
+		case 'd': text = pdfapp_edit_delete_char(app, text); break;
+		case 'e': text = pdfapp_edit_end_of_line(app, text); break;
+		case 'f': text = pdfapp_edit_forward_char(app, text); break;
+		case 'h': text = pdfapp_edit_backward_delete_char(app, text); break;
+		case 'k': text = pdfapp_edit_kill_line(app, text);  break;
+		case 'l': text = pdfapp_edit_clear_text(app, text); break;
+		case 'n': text = pdfapp_edit_forward_line(app, text); break;
+		case 'p': text = pdfapp_edit_backward_line(app, text);  break;
+		case 'u': text = pdfapp_edit_unix_line_discard(app, text); break;
+		case 'w': text = pdfapp_edit_unix_word_rubout(app, text);  break;
+		case KEY_HOME: text = pdfapp_edit_beginning_of_text(app, text); break;
+		case KEY_END: text = pdfapp_edit_end_of_text(app, text);  break;
+		case KEY_DELETE: text = pdfapp_edit_kill_word(app, text);  break;
+		case KEY_BACKSPACE: text = pdfapp_edit_backward_kill_word(app, text); break;
+		case KEY_LEFT: text = pdfapp_edit_backward_word(app, text); break;
+		case KEY_RIGHT: text = pdfapp_edit_forward_word(app, text); break;
+		case KEY_UP: text = pdfapp_edit_backward_paragraph(app, text); break;
+		case KEY_DOWN: text = pdfapp_edit_forward_paragraph(app, text); break;
+		case KEY_RETURN:
+		case KEY_ENTER: text = pdfapp_edit_eol_insert(app, text); break;
+		default: return;
 		}
-		break;
-
-	case KEY_BACKSPACE:
-		if (modifier & MODIFIER_CTRL)
+	else if (modifier & MODIFIER_ALT)
+		switch (c)
 		{
-			int idx = app->editindex;
-
-			while (idx > 0 && iswhite(text[idx - 1]))
-				idx--;
-
-			while (idx > 0 && !iswhite(text[idx - 1]))
-				idx--;
-
-			if (iswhite(text[idx]))
-				idx++;
-
-			memmove(&text[idx], &text[app->editindex], strlen(&text[app->editindex]) + 1);
-
-			app->editindex = idx;
-
-			pdf_text_widget_set_text(idoc, widget, text);
+		case 'b': text = pdfapp_edit_backward_word(app, text); break;
+		case 'd': text = pdfapp_edit_kill_word(app, text); break;
+		case 'f': text = pdfapp_edit_forward_word(app, text); break;
+		case '{': text = pdfapp_edit_backward_paragraph(app, text); break;
+		case '}': text = pdfapp_edit_forward_paragraph(app, text); break;
+		case '<': text = pdfapp_edit_beginning_of_text(app, text); break;
+		case '>': text = pdfapp_edit_end_of_text(app, text); break;
+		default: return;
 		}
-		else if (app->editindex > 0)
+	else
+		switch (c)
 		{
-			int idx = app->editindex--;
-			memmove(&text[idx-1], &text[idx], strlen(text) - idx + 1);
-			pdf_text_widget_set_text(idoc, widget, text);
+		case KEY_RETURN: text = pdfapp_edit_accept_line(app, text); break;
+		case KEY_ENTER: text = pdfapp_edit_accept_line(app, text); break;
+		case KEY_DELETE: text = pdfapp_edit_delete_char(app, text); break;
+		case KEY_BACKSPACE: text = pdfapp_edit_backward_delete_char(app, text); break;
+		case KEY_HOME: text = pdfapp_edit_beginning_of_line(app, text); break;
+		case KEY_END: text = pdfapp_edit_end_of_line(app, text); break;
+		case KEY_LEFT: text = pdfapp_edit_backward_char(app, text); break;
+		case KEY_RIGHT: text = pdfapp_edit_forward_char(app, text); break;
+		case KEY_UP: text = pdfapp_edit_backward_line(app, text); break;
+		case KEY_DOWN: text = pdfapp_edit_forward_line(app, text); break;
+		default: text = pdfapp_edit_self_insert(app, text, c); break;
 		}
-		break;
-
-	case KEY_HOME:
-		if (modifier & MODIFIER_CTRL)
-			app->editindex = 0;
-		else
-		{
-			int idx = app->editindex;
-
-			if (idx > 0 && text[idx - 1] == '\n')
-				idx--;
-			if (idx > 0 && text[idx - 1] == '\r')
-				idx--;
-
-			while (idx > 0 && text[idx] != '\n')
-				idx--;
-
-			if (text[idx] == '\n')
-				idx++;
-
-			app->editindex = idx;
-		}
-		break;
-
-	case KEY_LEFT:
-		if ((modifier & MODIFIER_CTRL) && app->editindex > 0)
-		{
-			int idx = app->editindex;
-
-			while (idx > 0 && iswhite(text[idx - 1]))
-				idx--;
-
-			if (idx > 0)
-				idx--;
-
-			while (idx > 0 && !iswhite(text[idx - 1]))
-				idx--;
-
-			app->editindex = idx;
-		}
-		else if (app->editindex > 0)
-			app->editindex--;
-		break;
-
-	case KEY_RIGHT:
-		if ((modifier & MODIFIER_CTRL) && app->editindex < strlen(text))
-		{
-			int idx = app->editindex;
-
-			while (idx < strlen(text) && !iswhite(text[idx]))
-				idx++;
-
-			while (idx < strlen(text) && iswhite(text[idx]))
-				idx++;
-
-			app->editindex = idx;
-		}
-		else if (app->editindex < strlen(text))
-			app->editindex++;
-		break;
-
-	case KEY_UP:
-		{
-			int idx = app->editindex;
-			int lineidx;
-
-			pdfapp_onkey_editing(app, 0, KEY_HOME);
-			lineidx = idx - app->editindex;
-
-			pdfapp_onkey_editing(app, 0, KEY_HOME);
-			idx = app->editindex;
-
-			while (idx < strlen(text) && lineidx > 0 && text[idx] != '\r' && text[idx] != '\n')
-			{
-				idx++;
-				lineidx--;
-			}
-
-			app->editindex = idx;
-		}
-		break;
-
-	case KEY_DOWN:
-		{
-			int idx = app->editindex;
-			int lineidx;
-
-			pdfapp_onkey_editing(app, 0, KEY_HOME);
-			lineidx = idx - app->editindex;
-
-			pdfapp_onkey_editing(app, 0, KEY_END);
-			pdfapp_onkey_editing(app, 0, KEY_END);
-			pdfapp_onkey_editing(app, 0, KEY_HOME);
-			idx = app->editindex;
-
-			while (idx < strlen(text) && lineidx > 0 && text[idx] != '\r' && text[idx] != '\n')
-			{
-				idx++;
-				lineidx--;
-			}
-
-			app->editindex = idx;
-		}
-		break;
-
-	case KEY_END:
-		if (modifier & MODIFIER_CTRL)
-			app->editindex = strlen(text);
-		else
-		{
-			int idx = app->editindex;
-
-			if (idx < strlen(text) && text[idx] == '\r')
-				idx++;
-			if (idx < strlen(text) && text[idx] == '\n')
-				idx++;
-
-			while (idx < strlen(text) && text[idx] != '\r' && text[idx] != '\n')
-				idx++;
-
-			app->editindex = idx;
-		}
-		break;
-
-	default:
-		{
-			int idx = app->editindex++;
-			text = fz_resize_array_no_throw(app->ctx, text, strlen(text) + 2, 1);
-			memmove(&text[idx + 1], &text[idx], strlen(text) - idx + 1);
-			text[idx] = c;
-			pdf_text_widget_set_text(idoc, widget, text);
-		}
-		break;
-	}
 
 	showcaret(app->ctx, text, app->editindex, "post: ");
 
+	pdf_text_widget_set_text(idoc, widget, text);
 	fz_free(app->ctx, text);
 
 	pdfapp_updatepage(app);
